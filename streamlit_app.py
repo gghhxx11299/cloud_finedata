@@ -1,100 +1,133 @@
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 
-# --- 1. SETTINGS & AUTH ---
-st.set_page_config(page_title="FINEDA HQ", layout="wide")
+# --- 1. CORE SETTINGS ---
+st.set_page_config(page_title="FINEDA HQ v3.0", layout="wide")
 
 def check_password():
     if "password_correct" not in st.session_state:
-        st.title("🛡️ FineData Secure Gate")
+        st.title("🛡️ FineData HQ Login")
         pwd = st.text_input("Admin Password", type="password")
-        if st.button("Unlock"):
+        if st.button("Access System"):
             if pwd == st.secrets["auth"]["password"]:
                 st.session_state["password_correct"] = True
                 st.rerun()
-            else: st.error("Wrong Password")
+            else: st.error("Access Denied")
         return False
     return True
 
 if check_password():
     conn = st.connection("gsheets", type=GSheetsConnection)
-    df = conn.read(ttl=0).astype(str) # Force string to avoid type errors
+    df = conn.read(ttl=0).astype(str)
+
+    # --- 2. SIDEBAR NAVIGATION ---
+    st.sidebar.title("🎮 Command Center")
+    page = st.sidebar.radio("Go To:", ["📊 Dashboard", "📜 Order Logs & Edit", "📝 New Entry"])
     
-    # --- 2. THE DASHBOARD ---
-    st.title("🦅 Finedata Command Center")
-    
-    # Net Profit Logic
-    qty_sum = pd.to_numeric(df['Qty'], errors='coerce').sum()
-    st.metric("Total Net Profit (800/unit)", f"{(qty_sum * 800):,.0f} ETB")
-    st.divider()
+    if st.sidebar.button("Logout"):
+        st.session_state["password_correct"] = False
+        st.rerun()
 
-    # --- 3. THE OPERATIONS HUB ---
-    tab1, tab2 = st.tabs(["🏗️ Production & Workflow", "📝 Manual Order Entry"])
+    # --- 3. PAGE: DASHBOARD (METRICS) ---
+    if page == "📊 Dashboard":
+        st.header("Business Intelligence")
+        
+        # Calculations
+        total_orders = len(df)
+        pending = len(df[df['Stage'] == 'Pending'])
+        ready = len(df[df['Stage'] == 'Ready'])
+        design_queue = len(df[df['Is_connected_designer'] == 'Yes'])
+        revenue = pd.to_numeric(df['Total'], errors='coerce').sum()
 
-    with tab1:
-        col_list, col_edit = st.columns([2, 1]) # 2/3 for table, 1/3 for edit form
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total Orders", total_orders)
+        m2.metric("Pending Queue", pending, delta=f"{pending} active", delta_color="inverse")
+        m3.metric("Ready to Ship", ready)
+        m4.metric("Gross Revenue", f"{revenue:,} ETB")
 
-        with col_list:
-            st.subheader("Current Orders")
-            search = st.text_input("🔍 Search Name/ID/Phone")
-            display_df = df[df.apply(lambda r: search.lower() in str(r).lower(), axis=1)] if search else df
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
+        st.divider()
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.subheader("Stage Breakdown")
+            st.bar_chart(df['Stage'].value_counts())
+        with col_b:
+            st.subheader("Design Status")
+            st.write(f"🎨 **Need Designer:** {len(df[df['Is_connected_designer'] == 'Yes'])}")
+            st.write(f"✅ **Designs Finished:** {len(df[df['Designer_finished'] == 'Yes'])}")
 
-        with col_edit:
-            st.subheader("⚙️ Quick Edit Row")
-            # Select which order to edit
-            order_to_edit = st.selectbox("Select Order ID to Update", options=df['Order_ID'].unique())
+    # --- 4. PAGE: ORDER LOGS & EDIT ---
+    elif page == "📜 Order Logs & Edit":
+        st.header("Order Management & Forensics")
+        
+        search = st.text_input("🔍 Search any ID, Name, or Phone")
+        display_df = df[df.apply(lambda r: search.lower() in str(r).lower(), axis=1)] if search else df
+        
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        
+        st.divider()
+        st.subheader("🛠️ Edit or Delete Order")
+        order_id = st.selectbox("Select Order ID", options=["Select..."] + list(df['Order_ID'].unique()))
+        
+        if order_id != "Select...":
+            row_idx = df[df['Order_ID'] == order_id].index[0]
+            curr = df.loc[row_idx]
             
-            if order_to_edit:
-                # Get current data for that row
-                row_data = df[df['Order_ID'] == order_to_edit].iloc[0]
+            with st.form("edit_form"):
+                c1, c2, c3 = st.columns(3)
+                # Design Workflow Columns
+                d_conf = c1.selectbox("Design Confirmed?", ["No", "Yes"], index=0 if curr.get('Design_confirmed') != 'Yes' else 1)
+                d_conn = c2.selectbox("Needs Designer?", ["No", "Yes"], index=0 if curr.get('Is_connected_designer') != 'Yes' else 1)
+                d_fin = c3.selectbox("Design Finished?", ["No", "Yes"], index=0 if curr.get('Designer_finished') != 'Yes' else 1)
                 
-                with st.form("edit_form"):
-                    new_stage = st.selectbox("Update Stage", 
-                                           options=["Pending", "Design Proof", "Printing", "Ready", "Delivered", "Hold"],
-                                           index=["Pending", "Design Proof", "Printing", "Ready", "Delivered", "Hold"].index(row_data['Stage']) if row_data['Stage'] in ["Pending", "Design Proof", "Printing", "Ready", "Delivered", "Hold"] else 0)
-                    
-                    new_paid = st.selectbox("Update Paid", 
-                                          options=["No", "Yes", "Partial"],
-                                          index=["No", "Yes", "Partial"].index(row_data['Paid']) if row_data['Paid'] in ["No", "Yes", "Partial"] else 0)
-                    
-                    new_biker = st.text_input("Assign Biker", value=row_data['Biker'])
-                    new_qty = st.number_input("Update Qty", value=int(pd.to_numeric(row_data['Qty'], errors='coerce') or 1))
-                    
-                    if st.form_submit_button("Save Changes"):
-                        # Find the index and update
-                        idx = df[df['Order_ID'] == order_to_edit].index[0]
-                        df.at[idx, 'Stage'] = new_stage
-                        df.at[idx, 'Paid'] = new_paid
-                        df.at[idx, 'Biker'] = new_biker
-                        df.at[idx, 'Qty'] = str(new_qty)
-                        df.at[idx, 'money'] = str(new_qty * 1200)
-                        df.at[idx, 'Total'] = str(new_qty * 1200)
-                        
-                        conn.update(data=df)
-                        st.success(f"Order {order_to_edit} Updated!")
-                        st.rerun()
+                # Logistics
+                u_stage = c1.selectbox("Stage", ["Pending", "Design Proof", "Printing", "Ready", "Delivered", "Hold"], index=0)
+                u_paid = c2.selectbox("Paid", ["No", "Yes", "Partial"], index=0)
+                u_biker = c3.text_input("Biker", value=curr['Biker'])
+                
+                col_save, col_del = st.columns([5, 1])
+                if col_save.form_submit_button("💾 Save Changes"):
+                    df.at[row_idx, 'Design_confirmed'] = d_conf
+                    df.at[row_idx, 'Is_connected_designer'] = d_conn
+                    df.at[row_idx, 'Designer_finished'] = d_fin
+                    df.at[row_idx, 'Stage'] = u_stage
+                    df.at[row_idx, 'Paid'] = u_paid
+                    df.at[row_idx, 'Biker'] = u_biker
+                    conn.update(data=df)
+                    st.success("Updated!")
+                    st.rerun()
+                
+                if col_del.form_submit_button("🗑️ DELETE"):
+                    df = df.drop(row_idx)
+                    conn.update(data=df)
+                    st.warning("Order Deleted.")
+                    st.rerun()
 
-    with tab2:
-        with st.form("manual_order", clear_on_submit=True):
-            st.subheader("Manual Registration")
+    # --- 5. PAGE: NEW ENTRY ---
+    elif page == "📝 New Entry":
+        st.header("Register New Order")
+        with st.form("new_entry_form", clear_on_submit=True):
             c1, c2 = st.columns(2)
-            m_id = c1.text_input("Order_ID")
-            name = c2.text_input("Customer Name")
-            phone = c1.text_input("Contact")
-            qty = c2.number_input("Quantity", min_value=1, value=1)
+            n_id = c1.text_input("Order_ID")
+            n_name = c2.text_input("Customer Name")
+            n_phone = c1.text_input("Contact")
+            n_qty = c2.number_input("Quantity", min_value=1, value=1)
             
-            if st.form_submit_button("Register Order"):
-                new_id = m_id if m_id else f"MAN-{datetime.now().strftime('%M%S')}"
-                price = qty * 1200
+            # New Designer Checkboxes
+            n_conn = st.checkbox("Customer needs a Designer")
+            
+            if st.form_submit_button("🚀 Add to Cloud"):
+                price = n_qty * 1200
                 new_row = pd.DataFrame([{
-                    "Order Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "Order_ID": new_id, "Name": name, "Contact": phone, "Qty": str(qty),
-                    "money": str(price), "Paid": "No", "Stage": "Pending", "Total": str(price), "Biker": "Unassigned"
+                    "Order Time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "Order_ID": n_id if n_id else f"MAN-{datetime.now().strftime('%M%S')}",
+                    "Name": n_name, "Contact": n_phone, "Qty": str(n_qty),
+                    "money": str(price), "Paid": "No", "Stage": "Pending", "Total": str(price), 
+                    "Biker": "Unassigned", "Design_confirmed": "No", 
+                    "Is_connected_designer": "Yes" if n_conn else "No", 
+                    "Designer_finished": "No"
                 }])
                 df = pd.concat([df, new_row], ignore_index=True)
                 conn.update(data=df)
-                st.success("Added!")
-                st.rerun()
+                st.success("Order Logged!")
