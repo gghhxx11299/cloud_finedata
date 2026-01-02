@@ -1,92 +1,94 @@
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 import pandas as pd
+from datetime import datetime, timedelta
 
-# --- AUTHENTICATION LOGIC ---
+# --- 1. THE BRAIN: PRICING & LOGIC (From your Bot) ---
+def get_unit_price(qty):
+    if qty >= 10: return 1000
+    if qty >= 5: return 1100
+    return 1200
+
+# --- 2. AUTHENTICATION (The Gabe135. Gate) ---
 def check_password():
     def password_entered():
         if st.session_state["password"] == st.secrets["auth"]["password"]:
             st.session_state["password_correct"] = True
-            del st.session_state["password"]  # Don't store password
-        else:
-            st.session_state["password_correct"] = False
-
+            del st.session_state["password"]
+        else: st.session_state["password_correct"] = False
     if "password_correct" not in st.session_state:
-        # First run, show login
-        st.title("🛡️ Finedata Cloud Login")
+        st.title("🛡️ FineData HQ")
         st.text_input("Admin Password", type="password", on_change=password_entered, key="password")
         return False
-    elif not st.session_state["password_correct"]:
-        # Password incorrect, show input + error
-        st.title("🛡️ Finedata Cloud Login")
-        st.text_input("Admin Password", type="password", on_change=password_entered, key="password")
-        st.error("😕 Password incorrect")
-        return False
-    else:
-        # Password correct
-        return True
+    return st.session_state["password_correct"]
 
 if check_password():
-    # --- APP STARTS HERE ---
-    st.set_page_config(page_title="FINEDA HQ", layout="wide")
-    
-    # 1. Connect & Load Data
+    st.set_page_config(page_title="FineData Command", layout="wide")
     conn = st.connection("gsheets", type=GSheetsConnection)
     df = conn.read(ttl=0)
 
-    # 2. Advanced Sidebar
-    st.sidebar.title("⚓ Command Center")
-    st.sidebar.info(f"Logged in as: **Admin**")
+    # Convert logic-heavy columns
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    df['Qty'] = pd.to_numeric(df['Qty'], errors='coerce').fillna(0)
     
-    app_mode = st.sidebar.radio("Navigate", ["📈 Executive Suite", "🛠️ Production Floor", "🚚 Logistics Hub"])
+    # --- 3. INTELLIGENT ALERTS (Making life easier) ---
+    st.title("🦅 Operational Oversight")
     
-    if st.sidebar.button("Logout"):
-        st.session_state["password_correct"] = False
-        st.rerun()
+    # Alert Logic: No contact within 1 hour (as promised in your bot)
+    now = datetime.now()
+    critical_followup = df[(df['Status'] == 'Pending') & (df['Date'] < (now - timedelta(hours=1)))]
+    
+    a1, a2, a3 = st.columns(3)
+    with a1:
+        if not critical_followup.empty:
+            st.error(f"⚠️ {len(critical_followup)} MISSING 1HR CONTACT PROMISE")
+    with a2:
+        payment_due = df[df['Payment'] == 'Unpaid']
+        st.warning(f"💸 {len(payment_due)} ORDERS UNPAID")
+    with a3:
+        # Calculate daily revenue from bot orders
+        today_rev = (df[df['Date'].dt.date == now.date()]['Qty'] * 1200).sum()
+        st.metric("Today's Revenue", f"{today_rev:,} ETB")
 
-    # --- MODE 1: EXECUTIVE SUITE ---
-    if app_mode == "📈 Executive Suite":
-        st.header("Financial Intelligence")
-        
-        # Complex Metrics
-        m1, m2, m3 = st.columns(3)
-        total_rev = (df['Qty'].astype(int) * 1200).sum()
-        total_profit = len(df) * 800
-        
-        m1.metric("Gross Revenue", f"{total_rev:,} ETB")
-        m2.metric("Net Profit (800/unit)", f"{total_profit:,} ETB", delta="Live")
-        m3.metric("Efficiency", "94%", delta="Target 98%")
-        
-        st.subheader("Master Data Ledger")
-        st.dataframe(df, use_container_width=True)
+    st.divider()
 
-    # --- MODE 2: PRODUCTION FLOOR ---
-    elif app_mode == "🛠️ Production Floor":
-        st.header("Manufacturing Queue")
-        
-        # Filter only what needs work
-        work_df = df[df['Status'].isin(["Pending", "Printing"])]
-        
+    # --- 4. THE COMMAND CENTER (Bilingual Tabs) ---
+    tab_manage, tab_finance, tab_bot_sync = st.tabs(["🚀 Production", "💰 Financials", "🤖 Bot Sync"])
+
+    with tab_manage:
+        st.subheader("Active Pipeline (Amharic & English)")
+        # Use Data Editor for easy status flips
         edited_df = st.data_editor(
-            work_df,
-            use_container_width=True,
+            df,
             column_config={
-                "Status": st.column_config.SelectboxColumn("Stage", options=["Pending", "Printing", "Ready"]),
-                "Payment": st.column_config.CheckboxColumn("Verified?")
-            }
+                "Status": st.column_config.SelectboxColumn(
+                    "Workflow", 
+                    options=["Pending", "Design Proof Sent", "Printing", "Ready", "Delivered", "Hold"]
+                ),
+                "Payment": st.column_config.SelectboxColumn("Cash", options=["Paid", "Unpaid", "Telebirr Pending"]),
+                "Biker": st.column_config.TextColumn("Delivery Info"),
+            },
+            hide_index=True, use_container_width=True
         )
-        
-        if st.button("Update Cloud"):
-            df.update(edited_df)
-            conn.update(data=df)
-            st.success("Production status synced.")
+        if st.button("Push Changes to Global Sheet"):
+            conn.update(data=edited_df)
+            st.balloons()
 
-    # --- MODE 3: LOGISTICS HUB ---
-    elif app_mode == "🚚 Logistics Hub":
-        st.header("Delivery Management")
-        ready_df = df[df['Status'] == "Ready"]
+    with tab_finance:
+        st.subheader("Net Profit Forensics")
+        # Automatic calculation using your business math (800 ETB profit per card)
+        total_cards = df['Qty'].sum()
+        net_profit = total_cards * 800
+        delivery_costs = len(df) * 200 # Based on your 200 ETB delivery fee logic
         
-        if ready_df.empty:
-            st.info("No orders ready for delivery yet.")
-        else:
-            st.data_editor(ready_df[["Name", "Contact", "Qty", "Status"]])
+        f1, f2, f3 = st.columns(3)
+        f1.metric("Net Profit", f"{net_profit:,} ETB")
+        f2.metric("Delivery Liabilities", f"{delivery_costs:,} ETB")
+        f3.metric("Avg Order Size", f"{df['Qty'].mean():.1f} Cards")
+
+    with tab_bot_sync:
+        st.info("Copy the Order ID from your Telegram bot and search it here to instantly find designs.")
+        search_id = st.text_input("🔍 Search Order ID (e.g., FD-2025...)")
+        if search_id:
+            result = df[df['Order_ID'] == search_id]
+            st.write(result)
