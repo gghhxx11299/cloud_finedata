@@ -3,92 +3,106 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime, timedelta
 
-# --- 1. THE BRAIN: PRICING & LOGIC (From your Bot) ---
-def get_unit_price(qty):
-    if qty >= 10: return 1000
-    if qty >= 5: return 1100
-    return 1200
+# --- 1. SETTINGS & AUTH ---
+st.set_page_config(page_title="FINEDA HQ", layout="wide")
 
-# --- 2. AUTHENTICATION (The Gabe135. Gate) ---
 def check_password():
-    def password_entered():
-        if st.session_state["password"] == st.secrets["auth"]["password"]:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]
-        else: st.session_state["password_correct"] = False
     if "password_correct" not in st.session_state:
-        st.title("🛡️ FineData HQ")
-        st.text_input("Admin Password", type="password", on_change=password_entered, key="password")
+        st.title("🛡️ FineData Secure Gate")
+        pwd = st.text_input("Admin Password", type="password")
+        if st.button("Unlock"):
+            if pwd == st.secrets["auth"]["password"]:
+                st.session_state["password_correct"] = True
+                st.rerun()
+            else: st.error("Wrong Password")
         return False
-    return st.session_state["password_correct"]
+    return True
 
 if check_password():
-    st.set_page_config(page_title="FineData Command", layout="wide")
     conn = st.connection("gsheets", type=GSheetsConnection)
-    df = conn.read(ttl=0)
+    
+    # --- 2. DATA SANITIZER (Prevents KeyErrors) ---
+    raw_df = conn.read(ttl=0)
+    
+    # Define exactly what your business needs
+    required_columns = ["Date", "Order_ID", "Name", "Contact", "Qty", "Payment", "Status", "Biker"]
+    
+    if raw_df is None or raw_df.empty:
+        df = pd.DataFrame(columns=required_columns)
+    else:
+        df = raw_df.copy()
+        for col in required_columns:
+            if col not in df.columns:
+                df[col] = "Missing" # Auto-fill missing columns so code doesn't crash
 
-    # Convert logic-heavy columns
-    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-    df['Qty'] = pd.to_numeric(df['Qty'], errors='coerce').fillna(0)
+    # Force Date conversion safely
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce').fillna(datetime.now())
+    df['Qty'] = pd.to_numeric(df['Qty'], errors='coerce').fillna(1)
+
+    # --- 3. THE "LIFE EASIER" DASHBOARD ---
+    st.title("🦅 Finedata Command Center")
     
-    # --- 3. INTELLIGENT ALERTS (Making life easier) ---
-    st.title("🦅 Operational Oversight")
-    
-    # Alert Logic: No contact within 1 hour (as promised in your bot)
+    # Smart Alerts: Contact within 1hr & Unpaid Ready orders
     now = datetime.now()
-    critical_followup = df[(df['Status'] == 'Pending') & (df['Date'] < (now - timedelta(hours=1)))]
-    
-    a1, a2, a3 = st.columns(3)
-    with a1:
-        if not critical_followup.empty:
-            st.error(f"⚠️ {len(critical_followup)} MISSING 1HR CONTACT PROMISE")
-    with a2:
-        payment_due = df[df['Payment'] == 'Unpaid']
-        st.warning(f"💸 {len(payment_due)} ORDERS UNPAID")
-    with a3:
-        # Calculate daily revenue from bot orders
-        today_rev = (df[df['Date'].dt.date == now.date()]['Qty'] * 1200).sum()
-        st.metric("Today's Revenue", f"{today_rev:,} ETB")
+    late_contact = df[(df['Status'] == 'Pending') & (df['Date'] < (now - timedelta(hours=1)))]
+    payment_hold = df[(df['Status'] == 'Ready') & (df['Payment'] != 'Paid')]
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if not late_contact.empty:
+            st.error(f"🚨 {len(late_contact)} CUSTOMERS WAITING >1HR")
+        else: st.success("✅ Contact Response Time: Good")
+    with col2:
+        if not payment_hold.empty:
+            st.warning(f"💳 {len(payment_hold)} READY BUT UNPAID")
+    with col3:
+        profit = (df['Qty'].sum() * 800)
+        st.metric("Total Net Profit", f"{profit:,} ETB")
 
     st.divider()
 
-    # --- 4. THE COMMAND CENTER (Bilingual Tabs) ---
-    tab_manage, tab_finance, tab_bot_sync = st.tabs(["🚀 Production", "💰 Financials", "🤖 Bot Sync"])
+    # --- 4. OPERATIONS & BOT SYNC ---
+    tab1, tab2 = st.tabs(["🏗️ Production & Workflow", "📝 Manual Order Entry"])
 
-    with tab_manage:
-        st.subheader("Active Pipeline (Amharic & English)")
-        # Use Data Editor for easy status flips
+    with tab1:
+        st.subheader("Live Pipeline")
+        # Search by Bot Order ID
+        search = st.text_input("🔍 Search Order ID or Phone")
+        display_df = df[df.apply(lambda r: search.lower() in str(r).lower(), axis=1)] if search else df
+        
         edited_df = st.data_editor(
-            df,
+            display_df,
             column_config={
                 "Status": st.column_config.SelectboxColumn(
-                    "Workflow", 
-                    options=["Pending", "Design Proof Sent", "Printing", "Ready", "Delivered", "Hold"]
+                    "Stage", options=["Pending", "Design Proof", "Printing", "Ready", "Delivered", "Hold"]
                 ),
-                "Payment": st.column_config.SelectboxColumn("Cash", options=["Paid", "Unpaid", "Telebirr Pending"]),
-                "Biker": st.column_config.TextColumn("Delivery Info"),
+                "Payment": st.column_config.SelectboxColumn(
+                    "Money", options=["Paid", "Unpaid", "Telebirr Pending"]
+                ),
+                "Date": st.column_config.DatetimeColumn("Order Time", format="D MMM, h:mm a"),
             },
             hide_index=True, use_container_width=True
         )
-        if st.button("Push Changes to Global Sheet"):
-            conn.update(data=edited_df)
-            st.balloons()
-
-    with tab_finance:
-        st.subheader("Net Profit Forensics")
-        # Automatic calculation using your business math (800 ETB profit per card)
-        total_cards = df['Qty'].sum()
-        net_profit = total_cards * 800
-        delivery_costs = len(df) * 200 # Based on your 200 ETB delivery fee logic
         
-        f1, f2, f3 = st.columns(3)
-        f1.metric("Net Profit", f"{net_profit:,} ETB")
-        f2.metric("Delivery Liabilities", f"{delivery_costs:,} ETB")
-        f3.metric("Avg Order Size", f"{df['Qty'].mean():.1f} Cards")
+        if st.button("🚀 Sync Changes to Cloud"):
+            conn.update(data=edited_df)
+            st.success("Cloud Updated!")
+            st.rerun()
 
-    with tab_bot_sync:
-        st.info("Copy the Order ID from your Telegram bot and search it here to instantly find designs.")
-        search_id = st.text_input("🔍 Search Order ID (e.g., FD-2025...)")
-        if search_id:
-            result = df[df['Order_ID'] == search_id]
-            st.write(result)
+    with tab2:
+        with st.form("manual_order"):
+            st.subheader("New Customer Registration")
+            c1, c2 = st.columns(2)
+            new_name = c1.text_input("Name")
+            new_phone = c2.text_input("Phone")
+            new_qty = st.number_input("Quantity", min_value=1)
+            new_id = f"MAN-{datetime.now().strftime('%m%d%H%M')}"
+            
+            if st.form_submit_button("Register Order"):
+                new_row = pd.DataFrame([{
+                    "Date": datetime.now(), "Order_ID": new_id, "Name": new_name,
+                    "Contact": new_phone, "Qty": new_qty, "Payment": "Unpaid", "Status": "Pending"
+                }])
+                df = pd.concat([df, new_row], ignore_index=True)
+                conn.update(data=df)
+                st.rerun()
