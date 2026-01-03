@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 st.set_page_config(page_title="FINEDA HQ", layout="wide")
 
+# Authentication
 if "password_correct" not in st.session_state:
     st.title("🛡️ FineData HQ Login")
     pwd = st.text_input("Admin Password", type="password")
@@ -15,21 +16,29 @@ if "password_correct" not in st.session_state:
         else: st.error("Denied")
     st.stop()
 
+# Connection
 conn = st.connection("gsheets", type=GSheetsConnection)
 df = conn.read(ttl=0).astype(str)
+
+# Ensure the new columns exist in the dataframe if they are missing from Excel
+for col in ['Exported', 'Called']:
+    if col not in df.columns:
+        df[col] = "No"
 
 try:
     expenses_df = conn.read(worksheet="Expenses", ttl=0).astype(str)
 except:
     expenses_df = pd.DataFrame(columns=["Date", "Amount", "Recipient", "Note"])
 
+# Data Processing
 df['Qty_num'] = pd.to_numeric(df['Qty'], errors='coerce').fillna(0)
 df['Total_num'] = pd.to_numeric(df['Total'], errors='coerce').fillna(0)
 df['Order Time'] = pd.to_datetime(df['Order Time'], errors='coerce')
 exp_total = pd.to_numeric(expenses_df['Amount'], errors='coerce').sum()
 now = datetime.now()
 
-page = st.sidebar.radio("Go To:", ["📊 Dashboard", "📜 Order Logs", "💸 Supplier Payouts", "📝 New Entry"])
+# Sidebar Navigation
+page = st.sidebar.radio("Go To:", ["📊 Dashboard", "📜 Order Logs", "📤 Supplier Export", "💸 Supplier Payouts", "📝 New Entry"])
 
 if page == "📊 Dashboard":
     st.header("Business Intelligence")
@@ -45,40 +54,9 @@ if page == "📊 Dashboard":
     f2.metric("⏳ To be Collected", f"{receivables:,} ETB")
     f3.metric("🏭 Supplier Debt", f"{current_debt:,} ETB", delta=f"Paid: {exp_total:,}")
 
-    st.divider()
-
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Ready (Not Delivered)", len(df[(df['Stage'] == 'Ready') & (df['Paid'] == 'Yes')]))
-    m2.metric("Delivered", len(df[df['Stage'] == 'Delivered']))
-    m3.metric("Prod/Design Done", len(df[(df['Stage'] != 'Ready') & (df['Designer_finished'] == 'Yes')]))
-    
-    m4, m5, m6 = st.columns(3)
-    m4.metric("Design Pending", len(df[(df['Stage'] != 'Ready') & (df['Designer_finished'] == 'No')]))
-    m5.metric("Total Queue", len(df))
-    m6.metric("VIP (>3)", len(df[df['Qty_num'] > 3]))
-
-    st.divider()
-    st.subheader("💎 VIP Priority Queue")
-    vips = df[df['Qty_num'] > 3]
-    if not vips.empty:
-        st.dataframe(vips[['Order_ID', 'Name', 'Qty', 'Stage']], use_container_width=True, hide_index=True)
-
-    st.divider()
-    st.subheader("⏳ Active Deadlines")
-    def get_status(row):
-        if pd.isna(row['Order Time']): return "⚪ No Date", "⚪ No Date"
-        p_rem = ((row['Order Time'] + timedelta(days=4)) - now).days
-        d_rem = ((row['Order Time'] + timedelta(days=7)) - now).days
-        p_f = f"🔴 LATE" if p_rem < 0 else (f"🟡 URGENT" if p_rem <= 1 else f"🟢 {p_rem}d")
-        d_f = f"🔴 LATE" if d_rem < 0 else (f"🟡 URGENT" if d_rem <= 1 else f"🟢 {d_rem}d")
-        return p_f, d_f
-
-    df['Production Status'], df['Delivery Status'] = zip(*df.apply(get_status, axis=1))
-    st.table(df[['Order_ID', 'Name', 'Stage', 'Production Status', 'Delivery Status']].sort_values('Order_ID'))
-
 elif page == "📜 Order Logs":
     st.header("Order Management")
-    search = st.text_input("🔍 Search")
+    search = st.text_input("🔍 Search (ID, Name, or Phone)")
     filtered = df[df.apply(lambda r: search.lower() in str(r).lower(), axis=1)] if search else df
     st.dataframe(filtered.drop(columns=['Qty_num', 'Total_num'], errors='ignore'), use_container_width=True, hide_index=True)
     
@@ -89,30 +67,59 @@ elif page == "📜 Order Logs":
         curr = df.loc[idx]
         with st.form("edit_form"):
             c1, c2, c3 = st.columns(3)
+            u_stage = c1.selectbox("Stage", ["Pending", "Printing", "Ready", "Delivered", "Hold"], index=["Pending", "Printing", "Ready", "Delivered", "Hold"].index(curr['Stage']) if curr['Stage'] in ["Pending", "Printing", "Ready", "Delivered", "Hold"] else 0)
+            u_paid = c2.selectbox("Paid", ["No", "Yes", "Partial"], index=["No", "Yes", "Partial"].index(curr['Paid']) if curr['Paid'] in ["No", "Yes", "Partial"] else 0)
+            u_called = c3.selectbox("Called Customer?", ["No", "Yes"], index=1 if curr.get('Called') == 'Yes' else 0)
+            
             d_conf = c1.selectbox("Design Confirmed?", ["No", "Yes"], index=1 if curr.get('Design_confirmed') == 'Yes' else 0)
-            d_conn = c2.selectbox("Needs Designer?", ["No", "Yes"], index=1 if curr.get('Is_connected_designer') == 'Yes' else 0)
-            d_fin = c3.selectbox("Design Finished?", ["No", "Yes"], index=1 if curr.get('Designer_finished') == 'Yes' else 0)
-            u_stage = c1.selectbox("Stage", ["Pending", "Printing", "Ready", "Delivered", "Hold"])
-            u_paid = c2.selectbox("Paid", ["No", "Yes", "Partial"])
+            d_fin = c2.selectbox("Design Finished?", ["No", "Yes"], index=1 if curr.get('Designer_finished') == 'Yes' else 0)
             u_biker = c3.text_input("Biker", value=curr['Biker'])
             
-            save_col, del_col = st.columns([5,1])
-            if save_col.form_submit_button("💾 Save"):
-                df.at[idx, 'Design_confirmed'] = d_conf
-                df.at[idx, 'Is_connected_designer'] = d_conn
-                df.at[idx, 'Designer_finished'] = d_fin
+            if st.form_submit_button("💾 Save Changes"):
                 df.at[idx, 'Stage'] = u_stage
                 df.at[idx, 'Paid'] = u_paid
+                df.at[idx, 'Called'] = u_called
+                df.at[idx, 'Design_confirmed'] = d_conf
+                df.at[idx, 'Designer_finished'] = d_fin
                 df.at[idx, 'Biker'] = u_biker
-                conn.update(data=df.drop(columns=['Qty_num', 'Total_num', 'Production Status', 'Delivery Status'], errors='ignore'))
+                
+                # Cleanup and Save
+                save_df = df.drop(columns=['Qty_num', 'Total_num'], errors='ignore')
+                conn.update(data=save_df)
+                st.success("Updated!")
                 st.rerun()
-            if del_col.form_submit_button("🗑️ DELETE"):
-                df = df.drop(idx)
-                conn.update(data=df.drop(columns=['Qty_num', 'Total_num', 'Production Status', 'Delivery Status'], errors='ignore'))
-                st.rerun()
+
+elif page == "📤 Supplier Export":
+    st.header("Supplier CSV Export")
+    st.write("Select a date range to find unexported orders.")
+    
+    col1, col2 = st.columns(2)
+    start_date = col1.date_input("Start Date", value=now - timedelta(days=7))
+    end_date = col2.date_input("End Date", value=now)
+    
+    # Filter by date and unexported status
+    mask = (df['Order Time'].dt.date >= start_date) & (df['Order Time'].dt.date <= end_date) & (df['Exported'] == "No")
+    to_export = df[mask].copy()
+    
+    if not to_export.empty:
+        st.write(f"Found **{len(to_export)}** new orders to export.")
+        st.dataframe(to_export[['Order_ID', 'Name', 'Qty', 'Order Time']], use_container_width=True)
+        
+        csv = to_export.drop(columns=['Qty_num', 'Total_num'], errors='ignore').to_csv(index=False).encode('utf-8')
+        
+        if st.download_button("📥 Download Supplier CSV", data=csv, file_name=f"supplier_batch_{now.strftime('%Y%m%d')}.csv", mime="text/csv"):
+            # Mark as exported in the main dataframe
+            df.loc[mask, 'Exported'] = "Yes"
+            save_df = df.drop(columns=['Qty_num', 'Total_num'], errors='ignore')
+            conn.update(data=save_df)
+            st.success("Orders marked as Exported!")
+            st.rerun()
+    else:
+        st.info("No new orders found for this date range.")
 
 elif page == "💸 Supplier Payouts":
     st.header("Supplier Payouts")
+    # ... (Keep existing payout code) ...
     with st.form("exp"):
         amount = st.number_input("Amount (ETB)", min_value=0)
         recp = st.text_input("Recipient")
@@ -125,6 +132,7 @@ elif page == "💸 Supplier Payouts":
 
 elif page == "📝 New Entry":
     st.header("New Order")
+    # ... (Keep existing new entry code) ...
     with st.form("new"):
         c1, c2 = st.columns(2)
         n_id = c1.text_input("Order_ID")
@@ -138,7 +146,8 @@ elif page == "📝 New Entry":
                 "Order Time": now.strftime("%Y-%m-%d %H:%M"), "Order_ID": n_id if n_id else f"MAN-{now.strftime('%M%S')}",
                 "Name": n_name, "Contact": n_phone, "Qty": str(n_qty), "money": str(price), "Paid": "No",
                 "Stage": "Pending", "Total": str(price), "Biker": "Unassigned", "Design_confirmed": "No",
-                "Is_connected_designer": "Yes" if n_conn else "No", "Designer_finished": "No"
+                "Is_connected_designer": "Yes" if n_conn else "No", "Designer_finished": "No", "Exported": "No", "Called": "No"
             }])
-            conn.update(data=pd.concat([df.drop(columns=['Qty_num','Total_num','Production Status','Delivery Status'], errors='ignore'), new_row]))
+            save_df = pd.concat([df.drop(columns=['Qty_num','Total_num'], errors='ignore'), new_row], ignore_index=True)
+            conn.update(data=save_df)
             st.rerun()
