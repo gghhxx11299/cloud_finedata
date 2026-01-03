@@ -1,13 +1,13 @@
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 import io
 
-# Page Config
+# Page Configuration
 st.set_page_config(page_title="FINEDA HQ", layout="wide", page_icon="📈")
 
 # --- 1. AUTHENTICATION ---
@@ -22,44 +22,49 @@ if "password_correct" not in st.session_state:
             st.error("Access Denied")
     st.stop()
 
-# --- 2. DRIVE UPLOAD HELPER (FIXED FOR QUOTA) ---
+# --- 2. DRIVE UPLOAD WITH OWNERSHIP TRANSFER ---
 def upload_to_drive(file_obj, filename):
     try:
         creds_info = st.secrets["connections"]["gsheets"]
+        admin_email = st.secrets["admin"]["email"]
+        
         creds = service_account.Credentials.from_service_account_info(
             creds_info, scopes=["https://www.googleapis.com/auth/drive"]
         )
         service = build('drive', 'v3', credentials=creds)
+        
         folder_id = "1yko-zxABjpZT6kiEEgX0luLktODbxJGJ" 
         
         file_metadata = {'name': filename, 'parents': [folder_id]}
         media = MediaIoBaseUpload(io.BytesIO(file_obj.getvalue()), mimetype=file_obj.type)
         
-        # Fixed: supportsAllDrives allows using the folder owner's quota
+        # Upload file
         file = service.files().create(
             body=file_metadata, 
             media_body=media, 
-            fields='id, webViewLink',
-            supportsAllDrives=True
+            fields='id, webViewLink'
         ).execute()
         
-        # Set permissions so links are viewable
+        file_id = file.get('id')
+
+        # Transfer ownership to utilize your 2TB quota
         service.permissions().create(
-            fileId=file.get('id'), 
-            body={'type': 'anyone', 'role': 'reader'},
-            supportsAllDrives=True
+            fileId=file_id,
+            body={'type': 'user', 'role': 'owner', 'emailAddress': admin_email},
+            transferOwnership=True,
+            fields='id'
         ).execute()
         
         return file.get('webViewLink')
     except Exception as e:
-        st.error(f"Drive Error: {e}")
+        st.error(f"Upload Error: {e}")
         return None
 
 # --- 3. DATA CONNECTIONS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 df = conn.read(ttl=0).astype(str)
 
-# Ensure columns exist
+# Ensure essential columns exist
 for col in ['Exported', 'Called', 'Stage', 'Paid', 'Biker', 'Total', 'Qty', 'Image_front', 'Image_back']:
     if col not in df.columns:
         df[col] = "None" if "Image" in col else "No" if col in ['Exported', 'Called', 'Paid'] else "0"
@@ -69,7 +74,7 @@ try:
 except:
     expenses_df = pd.DataFrame(columns=["Date", "Amount", "Recipient", "Note"])
 
-# --- 4. BUSINESS CALCULATIONS ---
+# --- 4. CALCULATIONS ---
 df['Qty_num'] = pd.to_numeric(df['Qty'], errors='coerce').fillna(0)
 df['Total_num'] = pd.to_numeric(df['Total'], errors='coerce').fillna(0)
 df['Order Time DT'] = pd.to_datetime(df['Order Time'], errors='coerce')
@@ -105,41 +110,33 @@ elif page == "📜 Order Logs":
     if order_id != "Select...":
         row = df[df['Order_ID'] == order_id].iloc[0]
         v1, v2 = st.columns(2)
-        if row['Image_front'] != "None":
-            v1.link_button("👁️ View Front Design", row['Image_front'])
-        if row['Image_back'] != "None":
-            v2.link_button("👁️ View Back Design", row['Image_back'])
+        if row['Image_front'] != "None": v1.link_button("👁️ Front Design", row['Image_front'])
+        if row['Image_back'] != "None": v2.link_button("👁️ Back Design", row['Image_back'])
 
 # --- PAGE: DESIGN VAULT ---
 elif page == "🎨 Design Vault":
-    st.header("Design Upload Center (Max 10MB)")
+    st.header("Design Upload Center (Ownership Transfer Mode)")
     target_id = st.selectbox("Select Order ID", ["Select..."] + list(df['Order_ID'].unique()))
     
     if target_id != "Select...":
         idx = df[df['Order_ID'] == target_id].index[0]
-        col1, col2 = st.columns(2)
-        with col1:
-            f_img = st.file_uploader("Front Design", type=['jpg','png','jpeg'], key="f")
-        with col2:
-            b_img = st.file_uploader("Back Design", type=['jpg','png','jpeg'], key="b")
+        c1, c2 = st.columns(2)
+        f_img = c1.file_uploader("Front Design", type=['jpg','png','jpeg'], key="f")
+        b_img = c2.file_uploader("Back Design", type=['jpg','png','jpeg'], key="b")
 
-        if st.button("🚀 Upload & Link to Sheet"):
-            with st.spinner("Processing..."):
+        if st.button("🚀 Upload & Transfer Ownership"):
+            with st.spinner("Processing upload to your personal quota..."):
                 updated = False
                 if f_img and f_img.size <= 10*1024*1024:
-                    link = upload_to_drive(f_img, f"{target_id}-image-front")
-                    if link:
-                        df.at[idx, 'Image_front'] = link
-                        updated = True
+                    link = upload_to_drive(f_img, f"{target_id}-front")
+                    if link: df.at[idx, 'Image_front'], updated = link, True
                 if b_img and b_img.size <= 10*1024*1024:
-                    link = upload_to_drive(b_img, f"{target_id}-image-back")
-                    if link:
-                        df.at[idx, 'Image_back'] = link
-                        updated = True
+                    link = upload_to_drive(b_img, f"{target_id}-back")
+                    if link: df.at[idx, 'Image_back'], updated = link, True
                 
                 if updated:
                     conn.update(data=df.drop(columns=['Qty_num', 'Total_num', 'Order Time DT'], errors='ignore'))
-                    st.success("Successfully uploaded to your Drive quota!")
+                    st.success("Successfully uploaded to your 2TB storage!")
                     st.rerun()
 
 # --- PAGE: SUPPLIER EXPORT ---
