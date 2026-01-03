@@ -22,7 +22,7 @@ if "password_correct" not in st.session_state:
             st.error("Access Denied")
     st.stop()
 
-# --- 2. DRIVE UPLOAD HELPER ---
+# --- 2. DRIVE UPLOAD HELPER (FIXED FOR QUOTA) ---
 def upload_to_drive(file_obj, filename):
     try:
         creds_info = st.secrets["connections"]["gsheets"]
@@ -35,8 +35,20 @@ def upload_to_drive(file_obj, filename):
         file_metadata = {'name': filename, 'parents': [folder_id]}
         media = MediaIoBaseUpload(io.BytesIO(file_obj.getvalue()), mimetype=file_obj.type)
         
-        file = service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
-        service.permissions().create(fileId=file.get('id'), body={'type': 'anyone', 'role': 'reader'}).execute()
+        # Fixed: supportsAllDrives allows using the folder owner's quota
+        file = service.files().create(
+            body=file_metadata, 
+            media_body=media, 
+            fields='id, webViewLink',
+            supportsAllDrives=True
+        ).execute()
+        
+        # Set permissions so links are viewable
+        service.permissions().create(
+            fileId=file.get('id'), 
+            body={'type': 'anyone', 'role': 'reader'},
+            supportsAllDrives=True
+        ).execute()
         
         return file.get('webViewLink')
     except Exception as e:
@@ -81,7 +93,7 @@ if page == "📊 Dashboard":
     c2.metric("⏳ To be Collected", f"{receivables:,} ETB")
     c3.metric("🏭 Supplier Debt", f"{current_debt:,} ETB")
 
-# --- PAGE: ORDER LOGS (WITH PREVIEW) ---
+# --- PAGE: ORDER LOGS ---
 elif page == "📜 Order Logs":
     st.header("Order Management")
     search = st.text_input("🔍 Search Orders")
@@ -89,12 +101,9 @@ elif page == "📜 Order Logs":
     st.dataframe(filtered.drop(columns=['Qty_num', 'Total_num', 'Order Time DT'], errors='ignore'), use_container_width=True, hide_index=True)
     
     st.divider()
-    order_id = st.selectbox("Select Order to View/Edit", ["Select..."] + list(df['Order_ID'].unique()))
-    
+    order_id = st.selectbox("Select Order to View Designs", ["Select..."] + list(df['Order_ID'].unique()))
     if order_id != "Select...":
         row = df[df['Order_ID'] == order_id].iloc[0]
-        
-        # Image Preview Section
         v1, v2 = st.columns(2)
         if row['Image_front'] != "None":
             v1.link_button("👁️ View Front Design", row['Image_front'])
@@ -103,7 +112,7 @@ elif page == "📜 Order Logs":
 
 # --- PAGE: DESIGN VAULT ---
 elif page == "🎨 Design Vault":
-    st.header("Design Upload Center")
+    st.header("Design Upload Center (Max 10MB)")
     target_id = st.selectbox("Select Order ID", ["Select..."] + list(df['Order_ID'].unique()))
     
     if target_id != "Select...":
@@ -114,8 +123,8 @@ elif page == "🎨 Design Vault":
         with col2:
             b_img = st.file_uploader("Back Design", type=['jpg','png','jpeg'], key="b")
 
-        if st.button("🚀 Finalize & Link to Sheet"):
-            with st.spinner("Uploading..."):
+        if st.button("🚀 Upload & Link to Sheet"):
+            with st.spinner("Processing..."):
                 updated = False
                 if f_img and f_img.size <= 10*1024*1024:
                     link = upload_to_drive(f_img, f"{target_id}-image-front")
@@ -130,7 +139,7 @@ elif page == "🎨 Design Vault":
                 
                 if updated:
                     conn.update(data=df.drop(columns=['Qty_num', 'Total_num', 'Order Time DT'], errors='ignore'))
-                    st.success("Uploaded and linked!")
+                    st.success("Successfully uploaded to your Drive quota!")
                     st.rerun()
 
 # --- PAGE: SUPPLIER EXPORT ---
@@ -162,6 +171,10 @@ elif page == "📝 New Entry":
         oid = st.text_input("Order_ID")
         name = st.text_input("Name")
         if st.form_submit_button("Submit"):
-            new = pd.DataFrame([{"Order Time": now.strftime("%Y-%m-%d %H:%M"), "Order_ID": oid, "Name": name, "Qty": "1", "Paid": "No", "Stage": "Pending", "Total": "1200", "Exported": "No", "Called": "No", "Image_front": "None", "Image_back": "None"}])
+            new = pd.DataFrame([{
+                "Order Time": now.strftime("%Y-%m-%d %H:%M"), "Order_ID": oid, "Name": name, 
+                "Qty": "1", "Paid": "No", "Stage": "Pending", "Total": "1200", 
+                "Exported": "No", "Called": "No", "Image_front": "None", "Image_back": "None"
+            }])
             conn.update(data=pd.concat([df.drop(columns=['Qty_num','Total_num', 'Order Time DT'], errors='ignore'), new], ignore_index=True))
             st.rerun()
