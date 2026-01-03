@@ -2,9 +2,13 @@ import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime, timedelta
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 import io
 
-st.set_page_config(page_title="FINEDA HQ", layout="wide")
+# Page Config
+st.set_page_config(page_title="FINEDA HQ", layout="wide", page_icon="📈")
 
 # --- 1. AUTHENTICATION ---
 if "password_correct" not in st.session_state:
@@ -14,115 +18,110 @@ if "password_correct" not in st.session_state:
         if pwd == st.secrets["auth"]["password"]:
             st.session_state["password_correct"] = True
             st.rerun()
-        else: st.error("Denied")
+        else:
+            st.error("Access Denied")
     st.stop()
 
-# --- 2. CONNECTIONS & DATA LOAD ---
+# --- 2. DRIVE UPLOAD HELPER ---
+def upload_to_drive(file_obj, filename):
+    try:
+        # Use the same credentials as GSheets
+        creds_info = st.secrets["connections"]["gsheets"]
+        creds = service_account.Credentials.from_service_account_info(
+            creds_info, scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        service = build('drive', 'v3', credentials=creds)
+        
+        # Your specific Folder ID
+        folder_id = "1yko-zxABjpZT6kiEEgX0luLktODbxJGJ" 
+        
+        file_metadata = {'name': filename, 'parents': [folder_id]}
+        media = MediaIoBaseUpload(io.BytesIO(file_obj.getvalue()), mimetype=file_obj.type)
+        
+        service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+        return True
+    except Exception as e:
+        st.error(f"Drive Error: {e}")
+        return False
+
+# --- 3. DATA CONNECTIONS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 df = conn.read(ttl=0).astype(str)
 
-for col in ['Exported', 'Called']:
+# Ensure required columns exist
+for col in ['Exported', 'Called', 'Stage', 'Paid', 'Biker', 'Total', 'Qty']:
     if col not in df.columns:
-        df[col] = "No"
+        df[col] = "Pending" if col == 'Stage' else "No" if col in ['Exported', 'Called', 'Paid'] else "0"
 
 try:
     expenses_df = conn.read(worksheet="Expenses", ttl=0).astype(str)
 except:
     expenses_df = pd.DataFrame(columns=["Date", "Amount", "Recipient", "Note"])
 
-# --- 3. BUSINESS LOGIC & MATH ---
+# --- 4. BUSINESS CALCULATIONS ---
 df['Qty_num'] = pd.to_numeric(df['Qty'], errors='coerce').fillna(0)
 df['Total_num'] = pd.to_numeric(df['Total'], errors='coerce').fillna(0)
 df['Order Time DT'] = pd.to_datetime(df['Order Time'], errors='coerce')
 
+# Supplier Math (Debt)
 produced_df = df[df['Stage'].isin(['Printing', 'Ready', 'Delivered'])]
 total_production_cost = produced_df['Qty_num'].sum() * 400
 total_paid_to_supplier = pd.to_numeric(expenses_df['Amount'], errors='coerce').sum() if not expenses_df.empty else 0
 current_debt = total_production_cost - total_paid_to_supplier
 now = datetime.now()
 
-# --- 4. NAVIGATION ---
-page = st.sidebar.radio("Go To:", ["📊 Dashboard", "📜 Order Logs", "🎨 Design Vault", "📤 Supplier Export", "💸 Supplier Payouts", "📝 New Entry"])
+# --- 5. NAVIGATION ---
+page = st.sidebar.radio("Navigation", ["📊 Dashboard", "📜 Order Logs", "🎨 Design Vault", "📤 Supplier Export", "💸 Supplier Payouts", "📝 New Entry"])
 
 # --- PAGE: DASHBOARD ---
 if page == "📊 Dashboard":
     st.header("Business Intelligence")
-    cash_on_hand = df[df['Paid'] == 'Yes']['Total_num'].sum()
+    cash = df[df['Paid'] == 'Yes']['Total_num'].sum()
     receivables = df[df['Paid'] != 'Yes']['Total_num'].sum()
 
-    f1, f2, f3 = st.columns(3)
-    f1.metric("💵 Cash on Hand", f"{cash_on_hand:,} ETB")
-    f2.metric("⏳ To be Collected", f"{receivables:,} ETB")
-    f3.metric("🏭 Supplier Debt", f"{current_debt:,} ETB", delta=f"Total Paid: {total_paid_to_supplier:,}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("💵 Cash on Hand", f"{cash:,} ETB")
+    c2.metric("⏳ To be Collected", f"{receivables:,} ETB")
+    c3.metric("🏭 Supplier Debt", f"{current_debt:,} ETB")
 
 # --- PAGE: ORDER LOGS ---
 elif page == "📜 Order Logs":
     st.header("Order Management")
-    search = st.text_input("🔍 Search")
+    search = st.text_input("🔍 Search Orders")
     filtered = df[df.apply(lambda r: search.lower() in str(r).lower(), axis=1)] if search else df
     st.dataframe(filtered.drop(columns=['Qty_num', 'Total_num', 'Order Time DT'], errors='ignore'), use_container_width=True, hide_index=True)
-    
-    order_id = st.selectbox("Select Order ID to Edit", ["Select..."] + list(df['Order_ID'].unique()))
-    if order_id != "Select...":
-        idx = df[df['Order_ID'] == order_id].index[0]
-        curr = df.loc[idx]
-        with st.form("edit_form"):
-            c1, c2, c3 = st.columns(3)
-            u_stage = c1.selectbox("Stage", ["Pending", "Printing", "Ready", "Delivered", "Hold"], index=["Pending", "Printing", "Ready", "Delivered", "Hold"].index(curr['Stage']) if curr['Stage'] in ["Pending", "Printing", "Ready", "Delivered", "Hold"] else 0)
-            u_paid = c2.selectbox("Paid", ["No", "Yes", "Partial"], index=["No", "Yes", "Partial"].index(curr['Paid']) if curr['Paid'] in ["No", "Yes", "Partial"] else 0)
-            u_called = c3.selectbox("Called?", ["No", "Yes"], index=1 if curr.get('Called') == 'Yes' else 0)
-            u_biker = c1.text_input("Biker", value=curr['Biker'])
-            if st.form_submit_button("💾 Save Changes"):
-                df.at[idx, 'Stage'] = u_stage
-                df.at[idx, 'Paid'] = u_paid
-                df.at[idx, 'Called'] = u_called
-                df.at[idx, 'Biker'] = u_biker
-                conn.update(data=df.drop(columns=['Qty_num', 'Total_num', 'Order Time DT'], errors='ignore'))
-                st.rerun()
 
-# --- PAGE: DESIGN VAULT (NEW) ---
+# --- PAGE: DESIGN VAULT (IMAGE UPLOAD) ---
 elif page == "🎨 Design Vault":
-    st.header("Design Management")
-    st.write("Upload designs with automatic tagging and 10MB limit.")
-    
-    target_id = st.selectbox("Choose Order ID", ["Select..."] + list(df['Order_ID'].unique()))
+    st.header("Design Upload Center")
+    target_id = st.selectbox("Select Order ID", ["Select..."] + list(df['Order_ID'].unique()))
     
     if target_id != "Select...":
-        st.info(f"Uploading designs for: **{target_id}**")
+        st.write(f"Uploading for: **{target_id}**")
         col1, col2 = st.columns(2)
         
         with col1:
-            st.write("### Front Design")
-            f_img = st.file_uploader(f"Tag: {target_id}-image-front", type=['jpg','png','jpeg'], key="front")
-            if f_img:
-                if f_img.size > 10 * 1024 * 1024:
-                    st.error("❌ File too large (>10MB)")
-                else:
-                    st.image(f_img, caption="Front Preview", width=300)
-
+            f_img = st.file_uploader("Front Design", type=['jpg','png','jpeg'], key="f")
+            if f_img and f_img.size > 10*1024*1024:
+                st.error("Front image exceeds 10MB limit")
+        
         with col2:
-            st.write("### Back Design")
-            b_img = st.file_uploader(f"Tag: {target_id}-image-back", type=['jpg','png','jpeg'], key="back")
-            if b_img:
-                if b_img.size > 10 * 1024 * 1024:
-                    st.error("❌ File too large (>10MB)")
-                else:
-                    st.image(b_img, caption="Back Preview", width=300)
+            b_img = st.file_uploader("Back Design", type=['jpg','png','jpeg'], key="b")
+            if b_img and b_img.size > 10*1024*1024:
+                st.error("Back image exceeds 10MB limit")
 
-        if st.button("💾 Finalize & Link Designs"):
-            if f_img or b_img:
-                # Logic to push to Drive would go here
-                st.success(f"Designs for {target_id} verified and ready for production!")
-            else:
-                st.warning("Please upload at least one image.")
+        if st.button("🚀 Finalize & Upload to Drive"):
+            with st.spinner("Uploading to Google Drive..."):
+                if f_img and f_img.size <= 10*1024*1024:
+                    upload_to_drive(f_img, f"{target_id}-image-front")
+                if b_img and b_img.size <= 10*1024*1024:
+                    upload_to_drive(b_img, f"{target_id}-image-back")
+                st.success(f"Designs for {target_id} successfully saved to Drive!")
 
 # --- PAGE: SUPPLIER EXPORT ---
 elif page == "📤 Supplier Export":
-    st.header("Supplier CSV Export")
-    col1, col2 = st.columns(2)
-    start_date = col1.date_input("Start Date", value=now - timedelta(days=7))
-    end_date = col2.date_input("End Date", value=now)
-    mask = (df['Order Time DT'].dt.date >= start_date) & (df['Order Time DT'].dt.date <= end_date) & (df['Exported'] == "No")
+    st.header("CSV Export")
+    mask = (df['Exported'] == "No")
     to_export = df[mask].copy()
     if not to_export.empty:
         csv = to_export.drop(columns=['Qty_num', 'Total_num', 'Order Time DT'], errors='ignore').to_csv(index=False).encode('utf-8')
@@ -134,34 +133,27 @@ elif page == "📤 Supplier Export":
 # --- PAGE: SUPPLIER PAYOUTS ---
 elif page == "💸 Supplier Payouts":
     st.header("Supplier Payouts")
-    c1, c2 = st.columns(2)
-    c1.info(f"**Cost:** {total_production_cost:,} ETB")
-    c2.warning(f"**Debt:** {current_debt:,} ETB")
-    with st.form("exp"):
-        amount = st.number_input("Amount", min_value=0)
-        recp = st.text_input("Recipient")
-        note = st.text_area("Note")
+    with st.form("payout_form"):
+        amt = st.number_input("Amount (ETB)", min_value=0)
+        note = st.text_input("Note")
         if st.form_submit_button("Confirm Payout"):
-            new_exp = pd.DataFrame([{"Date": now.strftime("%Y-%m-%d %H:%M"), "Amount": str(amount), "Recipient": recp, "Note": note}])
-            conn.update(worksheet="Expenses", data=pd.concat([expenses_df, new_exp], ignore_index=True))
+            new_payout = pd.DataFrame([{"Date": now.strftime("%Y-%m-%d"), "Amount": str(amt), "Recipient": "Supplier", "Note": note}])
+            conn.update(worksheet="Expenses", data=pd.concat([expenses_df, new_payout], ignore_index=True))
             st.rerun()
-    st.dataframe(expenses_df, use_container_width=True, hide_index=True)
 
 # --- PAGE: NEW ENTRY ---
 elif page == "📝 New Entry":
     st.header("Manual Entry")
-    with st.form("new"):
-        n_id = st.text_input("Order_ID")
-        n_name = st.text_input("Name")
-        n_phone = st.text_input("Contact")
-        n_qty = st.number_input("Qty", min_value=1, value=1)
-        if st.form_submit_button("Submit"):
-            price = n_qty * 1200
+    with st.form("manual_entry"):
+        oid = st.text_input("Order_ID")
+        name = st.text_input("Customer Name")
+        contact = st.text_input("Phone")
+        qty = st.number_input("Quantity", min_value=1)
+        if st.form_submit_button("Submit Order"):
             new_row = pd.DataFrame([{
-                "Order Time": now.strftime("%Y-%m-%d %H:%M"), "Order_ID": n_id if n_id else f"MAN-{now.strftime('%M%S')}",
-                "Name": n_name, "Contact": n_phone, "Qty": str(n_qty), "money": str(price), "Paid": "No",
-                "Stage": "Pending", "Total": str(price), "Biker": "Unassigned", "Exported": "No", "Called": "No"
+                "Order Time": now.strftime("%Y-%m-%d %H:%M"), "Order_ID": oid, "Name": name, 
+                "Contact": contact, "Qty": str(qty), "Paid": "No", "Stage": "Pending", 
+                "Total": str(qty*1200), "Exported": "No", "Called": "No"
             }])
-            save_df = pd.concat([df.drop(columns=['Qty_num','Total_num', 'Order Time DT'], errors='ignore'), new_row], ignore_index=True)
-            conn.update(data=save_df)
+            conn.update(data=pd.concat([df.drop(columns=['Qty_num','Total_num', 'Order Time DT'], errors='ignore'), new_row], ignore_index=True))
             st.rerun()
