@@ -2,10 +2,6 @@ import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
-import io
 
 # Page Configuration
 st.set_page_config(page_title="FINEDA HQ", layout="wide", page_icon="📈")
@@ -22,49 +18,11 @@ if "password_correct" not in st.session_state:
             st.error("Access Denied")
     st.stop()
 
-# --- 2. DRIVE UPLOAD WITH OWNERSHIP TRANSFER ---
-def upload_to_drive(file_obj, filename):
-    try:
-        creds_info = st.secrets["connections"]["gsheets"]
-        admin_email = st.secrets["admin"]["email"]
-        
-        creds = service_account.Credentials.from_service_account_info(
-            creds_info, scopes=["https://www.googleapis.com/auth/drive"]
-        )
-        service = build('drive', 'v3', credentials=creds)
-        
-        folder_id = "1yko-zxABjpZT6kiEEgX0luLktODbxJGJ" 
-        
-        file_metadata = {'name': filename, 'parents': [folder_id]}
-        media = MediaIoBaseUpload(io.BytesIO(file_obj.getvalue()), mimetype=file_obj.type)
-        
-        # Upload file
-        file = service.files().create(
-            body=file_metadata, 
-            media_body=media, 
-            fields='id, webViewLink'
-        ).execute()
-        
-        file_id = file.get('id')
-
-        # Transfer ownership to utilize your 2TB quota
-        service.permissions().create(
-            fileId=file_id,
-            body={'type': 'user', 'role': 'owner', 'emailAddress': admin_email},
-            transferOwnership=True,
-            fields='id'
-        ).execute()
-        
-        return file.get('webViewLink')
-    except Exception as e:
-        st.error(f"Upload Error: {e}")
-        return None
-
-# --- 3. DATA CONNECTIONS ---
+# --- 2. DATA CONNECTIONS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 df = conn.read(ttl=0).astype(str)
 
-# Ensure essential columns exist
+# Ensure columns exist
 for col in ['Exported', 'Called', 'Stage', 'Paid', 'Biker', 'Total', 'Qty', 'Image_front', 'Image_back']:
     if col not in df.columns:
         df[col] = "None" if "Image" in col else "No" if col in ['Exported', 'Called', 'Paid'] else "0"
@@ -74,7 +32,7 @@ try:
 except:
     expenses_df = pd.DataFrame(columns=["Date", "Amount", "Recipient", "Note"])
 
-# --- 4. CALCULATIONS ---
+# --- 3. CALCULATIONS ---
 df['Qty_num'] = pd.to_numeric(df['Qty'], errors='coerce').fillna(0)
 df['Total_num'] = pd.to_numeric(df['Total'], errors='coerce').fillna(0)
 df['Order Time DT'] = pd.to_datetime(df['Order Time'], errors='coerce')
@@ -85,7 +43,7 @@ total_paid_to_supplier = pd.to_numeric(expenses_df['Amount'], errors='coerce').s
 current_debt = total_production_cost - total_paid_to_supplier
 now = datetime.now()
 
-# --- 5. NAVIGATION ---
+# --- 4. NAVIGATION ---
 page = st.sidebar.radio("Navigation", ["📊 Dashboard", "📜 Order Logs", "🎨 Design Vault", "📤 Supplier Export", "💸 Supplier Payouts", "📝 New Entry"])
 
 # --- PAGE: DASHBOARD ---
@@ -113,31 +71,25 @@ elif page == "📜 Order Logs":
         if row['Image_front'] != "None": v1.link_button("👁️ Front Design", row['Image_front'])
         if row['Image_back'] != "None": v2.link_button("👁️ Back Design", row['Image_back'])
 
-# --- PAGE: DESIGN VAULT ---
+# --- PAGE: DESIGN VAULT (LINK VERSION) ---
 elif page == "🎨 Design Vault":
-    st.header("Design Upload Center (Ownership Transfer Mode)")
+    st.header("Design Link Manager")
     target_id = st.selectbox("Select Order ID", ["Select..."] + list(df['Order_ID'].unique()))
     
     if target_id != "Select...":
         idx = df[df['Order_ID'] == target_id].index[0]
-        c1, c2 = st.columns(2)
-        f_img = c1.file_uploader("Front Design", type=['jpg','png','jpeg'], key="f")
-        b_img = c2.file_uploader("Back Design", type=['jpg','png','jpeg'], key="b")
+        st.info("Upload designs to your AAU Drive manually, then paste the 'Anyone with link' links below.")
+        
+        f_link = st.text_input("Front Design Link", value=df.at[idx, 'Image_front'])
+        b_link = st.text_input("Back Design Link", value=df.at[idx, 'Image_back'])
 
-        if st.button("🚀 Upload & Transfer Ownership"):
-            with st.spinner("Processing upload to your personal quota..."):
-                updated = False
-                if f_img and f_img.size <= 10*1024*1024:
-                    link = upload_to_drive(f_img, f"{target_id}-front")
-                    if link: df.at[idx, 'Image_front'], updated = link, True
-                if b_img and b_img.size <= 10*1024*1024:
-                    link = upload_to_drive(b_img, f"{target_id}-back")
-                    if link: df.at[idx, 'Image_back'], updated = link, True
-                
-                if updated:
-                    conn.update(data=df.drop(columns=['Qty_num', 'Total_num', 'Order Time DT'], errors='ignore'))
-                    st.success("Successfully uploaded to your 2TB storage!")
-                    st.rerun()
+        if st.button("💾 Save Links to Sheet"):
+            df.at[idx, 'Image_front'] = f_link if f_link else "None"
+            df.at[idx, 'Image_back'] = b_link if b_link else "None"
+            
+            conn.update(data=df.drop(columns=['Qty_num', 'Total_num', 'Order Time DT'], errors='ignore'))
+            st.success("Links saved successfully!")
+            st.rerun()
 
 # --- PAGE: SUPPLIER EXPORT ---
 elif page == "📤 Supplier Export":
